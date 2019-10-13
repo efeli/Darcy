@@ -1,0 +1,105 @@
+/* Darcy2D pelo método SHDM */
+
+include "common.idp"
+load "iovtk";
+load "Element_PkEdge"   //pra as arestas
+load "Element_Mixte"    //Elemntos do tipo RT, BDM
+load "Element_P3"
+
+macro Div(u) (dx(u[0])+dy(u[1]))//
+macro Rot(u) (dx(u[1])-dy(u[0]))//
+macro Nor(u) (u[0]*N.x + u[1]*N.y)//
+macro u() [u1,u2]//
+macro v() [v1,v2]//
+macro grad(p) [dx(p),dy(p)]//
+
+real eps = 1e-7;
+real xini= 0.0, xfim=1.0;
+real yini= 0.0, yfim=1.0;
+
+int nref = 4;
+real[int] L2erroP(10000);
+real[int] L2erroU(10000);
+
+for(int n=0; n<nref; n++){
+	  int nel = 10*2^n; //2^(n+4);
+	//mesh Th=buildmesh(G1(n)+G2(n)+G3(n)+G4(n)); // malha não estruturada
+	  mesh Th=square(nel,nel,[xini+(xfim-xini)*x, yini+(yfim-yini)*y], flags=1);
+
+	  real del1 = -0.5;
+	  real del2 = 0.5;
+	  real del3 = 0.5;
+
+	  func f = 8*pi*pi*sin(2*pi*x)*sin(2*pi*y);
+	  /* pressão exata */
+	  func pe = sin(2*pi*x)*sin(2*pi*y);
+
+	  /* velocidade exata */
+	  func ue1 = -2*pi*cos(2*pi*x)*sin(2*pi*y);
+	  func ue2 = -2*pi*sin(2*pi*x)*cos(2*pi*y);
+
+	  /* Condição de contorno */
+	  func g = 0.0;	  
+
+	  fespace Vh(Th,[P2dc,P2dc,P2dc,P2edge]);
+	  fespace Ih(Th,[P1,P1]);
+	  fespace Rh(Th,P1);
+
+	  Vh [u1,u2,p,l1], [v1,v2,q,m1];
+	  
+	  problem HDGDarcy([u1,u2,p,l1],[v1,v2,q,m1], solver=sparsesolver) = int2d(Th)( u'*v )
+									   - int2d(Th)( Div(v)*p )
+									   - int2d(Th)( Div(u)*q )
+		                        //+ int2d(Th)( del1*((u1+dx(p))*(v1+dx(q))+(u2+dx(p))*(v2+dx(q))) )
+									   + int2d(Th)( del1*(u+grad(p))'*(v+grad(q)) )
+									   + int2d(Th)( del2*Div(u)*Div(v) )
+		                        				   + int2d(Th)( del3*Rot(u)*Rot(v) )
+									   - int2d(Th)( eps*p*q )
+		                        				   + intfa(Th)( Nor(v)*l1 )
+		                        				   + intfa(Th)( Nor(u)*m1 )
+									   - int2d(Th)( -f*q + del2*f*Div(v) )
+									   + on(1,2,3,4,l1=g);
+
+
+
+	  //real cpu1 = clock();
+	  HDGDarcy;
+	  //real cpu2 = clock()-cpu1;
+	  //cout << "Tempo de Simulacao =" << cpu2 << endl;
+
+	  Ih [u1int, u2int] = [u1,u2];
+	  Rh pint = p;
+	  L2erroP[n] = int2d(Th)(abs(pint-pe)^2);
+	  L2erroU[n] = int2d(Th)(abs(u1int-ue1)^2 + abs(u2int-ue2)^2);
+	  //L2erroU[n] = int2d(Th)(abs(u1-ue1)^2 + abs(u2-ue2)^2);
+
+	  cout<< "Dofs =" << Vh.ndof << endl;
+
+}
+
+
+ofstream fp("pressaoSDHM222.dat");
+ofstream fv("velocidadeSDHM222.dat");
+for(int n=0; n<nref; n++){
+	fp << 10*2^n <<"\t"<< L2erroP[n] << endl;
+}
+for(int n=0; n<nref; n++){
+	fv << 10*2^n <<"\t"<< L2erroU[n] << endl;
+}
+
+
+for(int n=1; n<nref; n++){
+	cout <<"Taxa de Convergencia P ="<< log10(L2erroP[n-1]/L2erroP[n])/log10(2.0) << endl;
+}
+
+cout << "=================================" << endl;
+
+for(int n=1; n<nref; n++){
+	cout <<"Taxa de Convergencia U ="<< log10(L2erroU[n-1]/L2erroU[n])/log10(2.0) << endl;
+}
+/* Graficas da solução */
+//plot(u,wait=1,value=1);
+//plot(p,dim=2,fill=1,wait=1,value=1);
+
+//int[int] Order = [1, 1];
+//savevtk("sdhm.vtu",Th,u,p, dataname="u p", order=Order);

@@ -1,0 +1,151 @@
+/* Resolve a Eq. de Darcy 2D
+   utilizando discretizações mistas continuas
+*/
+
+load "Element_Mixte"    //Elemntos do tipo RT, BDM
+load "iovtk"            // saida pra paraview
+bool PRECOND = true;   //se desajamos trabalhar com precondicionador
+real TOL     = 1.e-08;  // tolerança pra o GMRES
+
+//  Gradiente de uma função escalar
+macro Grad(u) [dx(u), dy(u)] //EOM
+
+//  Divergente de uma função vetorial
+macro Div(u1,u2) ( dx(u1) + dy(u2) ) //EOM
+
+//  Magnitude da velocidade
+macro Velocidade(u1,u2) ( sqrt( u1^2 + u2^2 ) ) //EOM
+
+mesh Th;
+Th = square(80,80,flags=1);
+
+//   Mixed FE spaces and functions
+
+//fespace Wh(Th,RT0),Qh(Th,P0),Ih(Th,[P1,P1]);
+//fespace Wh(Th,BDM1),Qh(Th,P0),Ih(Th,BDM1);
+fespace Wh(Th,RT1),Qh(Th,P1dc),Ih(Th,RT1);
+
+/* Funções teste e admissiveis pra velocidade */                          
+Wh [u1,u2],[v1,v2];
+
+/* Funções teste e admissiveis pra pressão */
+Qh p,q;
+
+/* Graus de libertade da formulação mista */
+real dimWh = Wh.ndof;
+real dimQh = Qh.ndof;
+real dimTot = dimWh+dimQh;
+
+/* Permeabilidade do meio */
+real kappa = 1.;
+
+/* Termo Fonte */
+func f = 8*pi*pi*kappa*sin(2*pi*x)*sin(2*pi*y);
+Qh fh = f;
+
+/* Condições de Contorno */
+func g = 0.;
+
+/* Pressão Exata */
+func pe   = sin(2*pi*x)*sin(2*pi*y);
+func pedx = 2*pi*cos(2*pi*x)*sin(2*pi*y);
+func pedy = 2*pi*sin(2*pi*x)*cos(2*pi*y);
+
+/* Velocidade Exata */
+func ue1 = -2*pi*kappa*cos(2*pi*x)*sin(2*pi*y);
+func ue2 = -2*pi*kappa*sin(2*pi*x)*cos(2*pi*y);
+func ue1dx = 4*pi*pi*kappa*sin(2*pi*x)*sin(2*pi*y);
+func ue2dy = 4*pi*pi*kappa*sin(2*pi*x)*sin(2*pi*y);
+
+
+/* Formulação variacional */
+varf a([u1,u2],[v1,v2]) = 
+	int2d(Th) ( 1./kappa*u1*v1 + 1./kappa*u2*v2 );
+varf b([u1,u2],[q]) = 
+	int2d(Th) ( (dx(u1) + dy(u2))*q ) ;
+varf bt([p],[v1,v2]) = 
+	int2d(Th) ( -p*(dx(v1) + dy(v2)) ) ;
+varf rhs(p,q) = 
+	int2d(Th) ( fh*q );
+
+/* Em forma matricial */	
+matrix A = a(Wh,Wh);
+matrix B = b(Wh,Qh);
+matrix Bt = bt(Qh,Wh);
+
+matrix AM = [[A,Bt],[B,0]];
+set(AM,solver=GMRES);
+
+real[int] FM(dimTot);
+FM(dimWh:dimTot-1) = rhs(0,Qh);
+real[int] UM(dimTot);
+
+/* Precondicionador por blocos */
+matrix PM;
+if (PRECOND) {
+varf masspres(p,q) = int2d(Th) ( p*q );
+matrix MP = masspres(Qh,Qh);
+PM = [[A,0],[0,MP]];
+set(PM,solver=UMFPACK);
+}
+else {
+real[int] one(dimTot); one = 1.;
+PM = one;
+set(PM,solver=UMFPACK);
+}
+
+/* Calculo do residual */
+real[int] R(dimTot); 
+func real[int] BlockDiag(real[int] &xx){
+  verbosity=1;
+  R=PM^-1*xx;
+  verbosity=3;
+  return R;
+}
+
+int i=0;
+func real[int] MatVec(real[int] &xx){
+  R=AM*xx;
+  i++;
+  if (i%50==0) cout<<"GMRES: iter "<< i <<endl;
+  return R;
+}
+
+/* Calculo da velocidade e pressão */
+real cpu1 = clock();
+//mixedDarcy;
+LinearGMRES(MatVec, UM, FM, nbiter=10000, eps=TOL, precon=BlockDiag);
+real cpu2 = clock()-cpu1;
+
+cout << "=============================="  << endl;
+cout << " Dof Misto: "   << dimTot        << endl;
+cout << " Tempo de CPU: " << cpu2 << "s"  << endl;
+cout << "=============================="  << endl;
+
+verbosity = 2;
+u1[] = UM(0:dimWh-1);
+p[]  = UM(dimWh:dimTot-1);
+
+/* Interpolação em Pk para postprocessamento (necessario pra RT0) */
+Ih [u1int, u2int] = [u1,u2];
+
+/* Calculo do div(V) e velocidade absoluta */
+Qh divu = Div(u1,u2);
+Qh um   = Velocidade(u1,u2);
+
+/* Calculo dos erros */
+real errpL2   = int2d(Th)(abs(p-pe)^2);
+real erruL2   = int2d(Th)(abs(u1int-ue1)^2 + abs(u2int-ue2)^2);
+real erruHdiv = erruL2 + int2d(Th)(abs(dx(u1)-ue1dx + dy(u2)-ue2dy)^2);
+
+cout << " ||p - ph||_0 = " << sqrt(errpL2)   << endl;
+cout << " ||u - uh||_0 = " << sqrt(erruL2)   << endl;
+cout << " ||u - uh||_1 = " << sqrt(erruHdiv) << endl;
+
+/* Saida em paraview */
+int[int] Order = [1,1];
+//savevtk("DarcyCG.vtk",Th,[u1int,u2int,0],p,dataname="u p", order=Order);
+//savevtk("DarcyCG2.vtk",Th,um,p,dataname="u p", order=Order);
+
+
+
